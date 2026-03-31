@@ -259,7 +259,9 @@ with tab1:
         tone = st.selectbox("语调", ["professional", "friendly", "urgent", "luxury", "humorous"])
         model_choice = st.selectbox("AI模型", list(MODEL_MAP.keys()))
     competitor_copy = st.text_area("🥊 竞品文案（可选）", placeholder="粘贴竞品文案生成超越版本", height=100)
-    if st.button("🎯 生成文案", type="primary", use_container_width=True):
+# 初始化订阅状态，防止服务器启动报错
+if "user_subscription" not in st.session_state:
+    st.session_state.user_subscription = "free"
         if not product_name or not selling_points:
             st.error("请填写产品名称和核心卖点")
         else:
