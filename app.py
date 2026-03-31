@@ -8,7 +8,12 @@ from dotenv import load_dotenv
 import hashlib
 
 load_dotenv()
+# --- 初始化 Session State (防止报错) ---
+if 'user_subscription' not in st.session_state:
+    st.session_state.user_subscription = "free"  # 默认为免费用户
 
+if 'messages' not in st.session_state:
+    st.session_state.messages = []  # 默认为空对话列表
 # ==================== 配置区 ====================
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
