@@ -228,6 +228,9 @@ st.sidebar.metric("Jasper成本", "¥120.00/百万 tokens")
 st.sidebar.metric("成本优势", "📉 93% 更低")
 st.sidebar.markdown("---")
 st.sidebar.header("📊 您的使用量")
+# 如果找不到用户等级，就默认设为免费用户
+if 'user_subscription' not in st.session_state:
+    st.session_state.user_subscription = 'free'
 plan = SUBSCRIPTION_PLANS.get(st.session_state.user_subscription, SUBSCRIPTION_PLANS["free"])
 limit = "无限" if plan["copies_limit"] == -1 else plan["copies_limit"]
 st.sidebar.metric("当前计划", st.session_state.user_subscription.upper())
