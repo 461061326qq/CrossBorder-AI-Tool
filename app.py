@@ -12,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 初始化 Session State ---
+# --- 初始化 Session State (统一管理) ---
 if 'generated_copy' not in st.session_state:
     st.session_state.generated_copy = ""
 if 'show_results' not in st.session_state:
@@ -21,7 +21,6 @@ if 'token_count' not in st.session_state:
     st.session_state.token_count = 0
 if 'save_voice' not in st.session_state:
     st.session_state.save_voice = False
-
 if 'user_subscription' not in st.session_state:
     st.session_state.user_subscription = "free"
 # --- 自定义 CSS 样式 (1:1 还原截图) ---
