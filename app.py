@@ -219,7 +219,14 @@ Keep your home clutter-free with our ultimate {product_name}. Designed for moder
         
         # 5. 满意度评分
         st.markdown('<div class="satisfaction">😃 您对结果满意吗？</div>', unsafe_allow_html=True)
-        st.feedback("stars")
+           # --- 替换为简易反馈按钮 ---
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("👍 有帮助"):
+            st.success("感谢反馈！")
+    with col2:
+        if st.button("👎 需改进"):
+            st.info("收到，我们会优化！")
         
         # 返回按钮
         if st.button("↩️ 返回修改"):
