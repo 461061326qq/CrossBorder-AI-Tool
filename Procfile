@@ -1,0 +1,1 @@
+web: python setup_db.py && streamlit run app.py
