@@ -2,7 +2,7 @@
 
 # 第一步：先运行建表脚本
 echo ">>> 正在检查并创建数据库表..."
-python setup_db.py
+python src/setup_db.py
 
 # 检查上一步是否成功（可选，但推荐）
 if [ $? -ne 0 ]; then
