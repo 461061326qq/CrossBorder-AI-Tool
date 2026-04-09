@@ -1,8 +1,13 @@
+import os
+from sqlalchemy import create_engine, text
 import streamlit as st
 import time
 import random
 import pandas as pd
 import base64
+from dotenv import load_dotenv
+load_dotenv()  # 这行必须有
+db_url = os.getenv("DATABASE_URL")
 
 # --- 页面配置 ---
 st.set_page_config(
@@ -218,15 +223,51 @@ Keep your home clutter-free with our ultimate {product_name}. Designed for moder
         """, unsafe_allow_html=True)
         
         # 5. 满意度评分
-        st.markdown('<div class="satisfaction">😃 您对结果满意吗？</div>', unsafe_allow_html=True)
-           # --- 替换为简易反馈按钮 ---
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("👍 有帮助"):
-            st.success("感谢反馈！")
-    with col2:
-        if st.button("👎 需改进"):
-            st.info("收到，我们会优化！")
+            # 5. 满意度评分（已连接数据库版）
+    st.markdown('<div class="satisfaction"><hr>😃 您觉得这个结果有帮助吗？</div>', unsafe_allow_html=True)
+    
+    # 创建两列布局，让按钮并排且美观
+    col_like, col_dislike = st.columns(2)
+    
+    # 生成一个唯一的 ID 用于标记这条内容（实际项目中可以用数据库的主键）
+    content_id = f"copy_{hash(st.session_state.generated_copy)}" 
+    user_id = "guest_user" # 暂时写死，未来可以换成登录用户的ID
+
+    with col_like:
+        # 👍 点赞按钮
+        if st.button("👍 有帮助，记下来", key="btn_like"):
+            try:
+                # --- 核心逻辑：写入数据库 ---
+                engine = create_engine(db_url)
+                with engine.connect() as conn:
+                    sql = text("""
+                        INSERT INTO user_feedback (user_id, content_id, action_type) 
+                        VALUES (:u_id, :c_id, 'like')
+                    """)
+                    conn.execute(sql, {"u_id": user_id, "c_id": content_id})
+                    conn.commit()
+                # -------------------------
+                st.success("感谢反馈！数据已存入云端")
+            except Exception as e:
+                st.error(f"记录失败: {e}")
+
+    with col_dislike:
+        # 👎 点踩按钮
+        if st.button("👎 需改进", key="btn_dislike"):
+            try:
+                # --- 核心逻辑：写入数据库 ---
+                engine = create_engine(os.getenv("DATABASE_URL"))
+                with engine.connect() as conn:
+                    sql = text("""
+                        INSERT INTO user_feedback (user_id, content_id, action_type) 
+                        VALUES (:u_id, :c_id, 'dislike')
+                    """)
+                    conn.execute(sql, {"u_id": user_id, "c_id": content_id})
+                    conn.commit()
+                # -------------------------
+                st.warning("收到，我们会针对性优化模型！")
+            except Exception as e:
+                st.error(f"记录失败: {e}")
         
         # 返回按钮
         if st.button("↩️ 返回修改"):
