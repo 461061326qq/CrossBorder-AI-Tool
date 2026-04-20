@@ -13,4 +13,8 @@ fi
 echo ">>> 数据库准备就绪，正在启动 Streamlit..."
 
 # 第二步：启动 Streamlit（保留你原来的这行命令）
+<<<<<<< HEAD
 streamlit run app.py --server.port $PORT
+=======
+streamlit run app.py --server.port $PORT
+>>>>>>> 514cbac7fa253461aec466643af09e23bc46431c
