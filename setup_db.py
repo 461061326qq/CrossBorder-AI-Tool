@@ -1,7 +1,8 @@
 import os
 import psycopg2
-
+from dotenv import load_dotenv
 def main():
+      load_dotenv()
     # 1. 从 Render 的环境变量里自动获取数据库地址
     db_url = os.environ.get("DATABASE_URL")
     
