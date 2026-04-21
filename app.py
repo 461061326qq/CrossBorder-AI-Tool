@@ -326,6 +326,11 @@ def main():
             password = st.text_input(get_text(lang, "password"), type="password", key="login_pass")
             if st.button(get_text(lang, "login_btn")):
                 with engine.connect() as conn:
+                    try:
+                        conn.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR;"))
+                        conn.commit()
+                    except:
+                        pass
                     result = conn.execute(text("SELECT id, password_hash FROM users WHERE username = :user"), {"user": username})
                     row = result.fetchone()
                     if row and pwd_context.verify(password, row[1]):
