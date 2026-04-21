@@ -327,10 +327,12 @@ def main():
             if st.button(get_text(lang, "login_btn")):
                 with engine.connect() as conn:
                     try:
+                        # 加上 IF NOT EXISTS，如果字段存在就不会报错
                         conn.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR;"))
                         conn.commit()
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"修复列失败: {e}")
+                        conn.rollback() # 如果出错，强制回滚，防止锁死
                     result = conn.execute(text("SELECT id, password_hash FROM users WHERE username = :user"), {"user": username})
                     row = result.fetchone()
                     if row and pwd_context.verify(password, row[1]):
