@@ -1,12 +1,10 @@
-fastapi==0.109.0
-uvicorn==0.25.0
---only-binary=pandas
+streamlit==1.41.1
+sqlalchemy>=2.0.0
 pandas==2.3.3
 numpy==1.26.3
-streamlit==1.41.1 # force rebuild 15:30
+openai==1.12.0
 requests==2.31.0
 python-dotenv==1.0.0
-openai==1.12.0
-protobuf==3.20.3 # force update 
+passlib[bcrypt]
 psycopg2-binary
-SQLAlchemy>=2.0.0
+protobuf==3.20.3

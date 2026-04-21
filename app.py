@@ -1,251 +1,359 @@
-import streamlit as st
-import pandas as pd
-import time
 import os
+import time
+import logging
+import streamlit as st
+import json
+import pandas as pd
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
+from passlib.context import CryptContext
 from datetime import datetime
+# 新增：导入 OpenAI SDK
+from openai import OpenAI
 
-# --- 页面基础配置 ---
-st.set_page_config(page_title="AI 智能文案生成器", page_icon="🚀", layout="centered")
+# ==========================================
+# 1. 基础配置与日志
+# ==========================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('app.log', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger('SEOApp')
 
-# --- 1. 数据库初始化与连接 ---
-# Render 会自动注入 DATABASE_URL 环境变量
-database_url = os.getenv("DATABASE_URL")
+# ==========================================
+# 2. 数据库与安全配置
+# ==========================================
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-if not database_url:
-    st.error("❌ 系统错误：未检测到数据库连接地址 (DATABASE_URL)。请检查 Render 后台设置。")
-    st.stop()
+# 数据库连接
+def get_db_engine():
+    db_url = os.getenv('DATABASE_URL')
+    if not db_url:
+        logger.error("DATABASE_URL 环境变量未设置")
+        return None
+    
+    # 修复 Postgres 协议前缀
+    if db_url.startswith('postgres://'):
+        db_url = 'postgresql://' + db_url[len('postgres://'):]
+    
+    try:
+        engine = create_engine(
+            db_url,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800
+        )
+        return engine
+    except Exception as e:
+        logger.error(f"数据库连接失败: {e}")
+        return None
 
-# 修复 Render 连接池问题 (重要)
-if database_url.startswith("postgres://"):
-    database_url = database_url.replace("postgres://", "postgresql://", 1)
-
-try:
-    engine = create_engine(
-        database_url,
-        pool_pre_ping=True,  # 连接前检测
-        pool_recycle=3600    # 1小时回收连接
-    )
-except Exception as e:
-    st.error(f"❌ 数据库连接失败：{e}")
-    st.stop()
-
-# --- 2. 数据库表结构初始化 (如果表不存在则创建) ---
+# 初始化数据库表
 def init_db():
-    with engine.begin() as conn:
-        # 创建用户表
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                user_name VARCHAR(50) UNIQUE NOT NULL,
-                password VARCHAR(100) NOT NULL,
-                balance DECIMAL(10, 2) DEFAULT 0.00,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """))
-        # 创建生成日志表
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS generation_logs (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER,
-                product_name VARCHAR(200),
-                features TEXT,
-                cost DECIMAL(10, 2),
-                result_text TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            )
-        """))
-        # 创建充值记录表
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS recharge_logs (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER,
-                amount DECIMAL(10, 2),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            )
-        """))
-
-init_db()
-
-# --- 3. 辅助函数 ---
-def get_user_by_username(username):
-    with engine.connect() as conn:
-        # 修正：WHERE user_name
-        result = conn.execute(text("SELECT * FROM users WHERE user_name = :u"), {"u": username})
-        return result.mappings().first()
-
-def create_user(username, password):
+    engine = get_db_engine()
+    if not engine:
+        return False
     try:
         with engine.begin() as conn:
-            # 修正：INSERT INTO users (user_name, ...)
-            conn.execute(text("INSERT INTO users (user_name, password, balance) VALUES (:u, :p, 0)"),
-                         {"u": username, "p": password})
-        return True
-    except SQLAlchemyError:
+            # 创建用户表
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(50) UNIQUE NOT NULL,
+                    password_hash VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            # 创建余额表
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS balances (
+                    user_id INTEGER PRIMARY KEY,
+                    balance DECIMAL(10, 2) DEFAULT 100.00,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+            """))
+            # 创建历史记录表
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS history (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
+                    topic VARCHAR(255),
+                    platform VARCHAR(50),
+                    content TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+            """))
+            logger.info("数据库初始化成功")
+            return True
+    except Exception as e:
+        logger.error(f"数据库建表失败: {e}")
         return False
 
-def log_generation(user_id, product, features, cost, result):
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO generation_logs (user_id, product_name, features, cost, result_text)
-            VALUES (:uid, :prod, :feat, :cost, :res)
-        """), {"uid": user_id, "prod": product, "feat": features, "cost": cost, "res": result})
+# ==========================================
+# 3. 多语言加载系统
+# ==========================================
+@st.cache_data
+def load_translations():
+    """加载多语言文件，如果不存在则返回默认结构"""
+    languages = {}
+    lang_dir = 'languages'
+    # 默认英文回退
+    default_translations = {
+        "login_title": "SEO Content Generator",
+        "username": "Username",
+        "password": "Password",
+        "login_btn": "Login",
+        "register_btn": "Register",
+        "logout": "Logout",
+        "topic_input": "Enter Topic",
+        "platform_select": "Select Platform",
+        "generate_btn": "Generate Content",
+        "history_title": "Generation History",
+        "balance": "Balance",
+        "error_empty_topic": "Please enter a topic",
+        "error_low_balance": "Insufficient balance",
+        "success_generation": "Content generated successfully",
+        "register_success": "Registration successful, please login"
+    }
+    languages['en'] = default_translations
+    
+    # 尝试加载中文
+    try:
+        if os.path.exists(f'{lang_dir}/zh.json'):
+            with open(f'{lang_dir}/zh.json', 'r', encoding='utf-8') as f:
+                languages['zh'] = json.load(f)
+        else:
+            # 如果文件不存在，创建一个默认的
+            os.makedirs(lang_dir, exist_ok=True)
+            with open(f'{lang_dir}/zh.json', 'w', encoding='utf-8') as f:
+                json.dump({
+                    "login_title": "SEO 内容生成器",
+                    "username": "用户名",
+                    "password": "密码",
+                    "login_btn": "登录",
+                    "register_btn": "注册",
+                    "logout": "退出登录",
+                    "topic_input": "输入主题",
+                    "platform_select": "选择平台",
+                    "generate_btn": "生成内容",
+                    "history_title": "生成历史",
+                    "balance": "余额",
+                    "error_empty_topic": "请输入主题",
+                    "error_low_balance": "余额不足",
+                    "success_generation": "内容生成成功",
+                    "register_success": "注册成功，请登录"
+                }, f, ensure_ascii=False, indent=4)
+            languages['zh'] = json.load(open(f'{lang_dir}/zh.json', 'r', encoding='utf-8'))
+    except Exception as e:
+        logger.error(f"加载语言包失败: {e}")
+        languages['zh'] = default_translations
+    return languages
 
-def log_recharge(user_id, amount):
-    with engine.begin() as conn:
-        conn.execute(text("UPDATE users SET balance = balance + :amt WHERE id = :uid"),
-                     {"amt": amount, "uid": user_id})
-        conn.execute(text("INSERT INTO recharge_logs (user_id, amount) VALUES (:uid, :amt)"),
-                     {"uid": user_id, "amt": amount})
+def get_text(lang_code, key):
+    translations = load_translations()
+    lang_dict = translations.get(lang_code, translations['en'])
+    return lang_dict.get(key, key)
 
-# --- 4. 会话状态管理 ---
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.user_id = None
-    st.session_state.username = None
-    st.session_state.balance = 0.0
+# ==========================================
+# 4. 核心业务逻辑类 (已修复 AI 生成部分)
+# ==========================================
+class SEOGenerator:
+    def __init__(self, user_id, engine):
+        self.user_id = user_id
+        self.engine = engine
+        # 初始化 OpenAI 客户端 (兼容 DeepSeek/百炼)
+        # 确保 .env 中配置了 BASE_URL 和 API_KEY
+        api_key = os.getenv("API_KEY")
+        base_url = os.getenv("BASE_URL", "https://api.openai.com/v1") # 默认 OpenAI
+        
+        if not api_key:
+            logger.error("API_KEY 未设置")
+            self.client = None
+        else:
+            self.client = OpenAI(api_key=api_key, base_url=base_url)
+            logger.info(f"AI 客户端初始化成功: {base_url}")
 
-# --- 5. 侧边栏：登录/注册/充值 ---
-with st.sidebar:
-    st.title("👤 用户中心")
+    def get_balance(self):
+        with self.engine.connect() as conn:
+            result = conn.execute(text("SELECT balance FROM balances WHERE user_id = :uid"), {"uid": self.user_id})
+            row = result.fetchone()
+            return float(row[0]) if row else 0.0
 
-    if not st.session_state.logged_in:
-        menu = ["登录", "注册"]
-        choice = st.selectbox("选择操作", menu)
+    def deduct_balance(self, amount):
+        with self.engine.begin() as conn:
+            conn.execute(text("UPDATE balances SET balance = balance - :amt WHERE user_id = :uid"), {"amt": amount, "uid": self.user_id})
 
-        if choice == "注册":
-            st.subheader("创建新账号")
-            new_user = st.text_input("用户名", key="reg_user")
-            new_pass = st.text_input("密码", type="password", key="reg_pass")
-            if st.button("立即注册"):
-                if new_user and new_pass:
-                    if create_user(new_user, new_pass):
-                        st.success("注册成功！请切换到登录页面。")
-                    else:
-                        st.error("用户名已存在。")
-                else:
-                    st.warning("请输入用户名和密码。")
+    def save_history(self, topic, platform, content):
+        with self.engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO history (user_id, topic, platform, content) 
+                VALUES (:uid, :topic, :platform, :content)
+            """), {"uid": self.user_id, "topic": topic, "platform": platform, "content": content})
 
-        elif choice == "登录":
-            st.subheader("用户登录")
-            login_user = st.text_input("用户名", key="login_user")
-            login_pass = st.text_input("密码", type="password", key="login_pass")
-            if st.button("登录"):
-                user = get_user_by_username(login_user)
-                if user and user['password'] == login_pass:
-                    st.session_state.logged_in = True
-                    st.session_state.user_id = user['id']
-                    st.session_state.username = user['user_name']
-                    st.session_state.balance = float(user['balance'])
-                    st.rerun()
-                else:
-                    st.error("用户名或密码错误。")
+    def generate_content(self, platform, topic, lang):
+        # 构建提示词
+        prompts = {
+            'blog': f"Write a professional SEO blog post about '{topic}'. Use markdown format.",
+            'instagram': f"Write a catchy Instagram caption about '{topic}'. Include emojis and hashtags.",
+            'linkedin': f"Write a professional LinkedIn post about '{topic}'. Focus on industry insights."
+        }
+        system_prompt = "You are an expert SEO content creator."
+        user_prompt = prompts.get(platform, f"Write content about {topic}")
 
-    else:
-        st.success(f"欢迎, **{st.session_state.username}**")
-        st.info(f"💰 当前余额: **¥{st.session_state.balance:.2f}**")
+        if not self.client:
+            return "Error: API Key not configured."
 
-        # 充值功能
-        st.markdown("---")
-        st.subheader("🔋 充值中心")
-        recharge_amt = st.number_input("充值金额", min_value=10, max_value=1000, step=10)
-        if st.button("模拟充值"):
-            log_recharge(st.session_state.user_id, recharge_amt)
-            st.session_state.balance += recharge_amt
-            st.success(f"充值成功！当前余额：¥{st.session_state.balance:.2f}")
-            st.rerun()
-
-        if st.button("退出登录"):
-            st.session_state.logged_in = False
-            st.session_state.user_id = None
-            st.session_state.username = None
-            st.rerun()
-
-# --- 6. 主界面逻辑 ---
-if not st.session_state.logged_in:
-    st.info("👈 请在左侧边栏登录或注册以使用 AI 生成功能")
-    st.markdown("""
-    ### 欢迎使用 AI 智能文案生成器
-    本工具专为电商卖家设计，基于 GPT 模型，能够根据商品特点快速生成高转化率的种草文案。
-    """)
-else:
-    st.title("✨ AI 智能种草文案生成")
-    st.markdown("输入商品信息，AI 自动为您撰写吸睛文案。")
-
-    with st.form(key='generate_form'):
-        col1, col2 = st.columns(2)
-        with col1:
-            product_name = st.text_input("商品名称", placeholder="例如：复古蓝牙音箱")
-            target_audience = st.selectbox("目标人群", ["大学生", "职场新人", "精致宝妈", "数码极客", "户外爱好者"])
-
-        with col2:
-            tone = st.selectbox("文案语气", ["幽默风趣", "专业测评", "情感共鸣", "简单直接", "小红书风"])
-            platform = st.selectbox("发布平台", ["小红书", "朋友圈", "抖音脚本", "淘宝详情页"])
-
-        features = st.text_area("商品卖点/特点 (用逗号分隔)", placeholder="例如：音质好，续航长，外观复古，价格便宜")
-
-        submitted = st.form_submit_button("🚀 开始生成 (消耗 ¥0.5)")
-
-        if submitted:
-            if not product_name or not features:
-                st.warning("请填写商品名称和卖点！")
-            elif st.session_state.balance < 0.5:
-                st.error("余额不足，请先在左侧充值！")
-            else:
-                # 模拟 AI 处理过程
-                with st.spinner('AI 正在思考中...'):
-                    time.sleep(2) # 模拟网络延迟
-
-                    # 这里原本是对接 OpenAI API 的地方，现在为了演示直接生成模拟文案
-                    prompt_text = f"{tone}风格的{platform}文案，产品：{product_name}，卖点：{features}"
-
-                    # 模拟生成的文案结果
-                    generated_text = f"""
-### 🔥 {product_name}：{target_audience}的必备神器！
-
-大家好呀！今天必须给你们按头安利这个我最近挖到的宝藏——**{product_name}**！
-
-💡 **为什么选它？**
-- {features.split('，')[0] if '，' in features else features.split(',')[0]}：这点真的太戳我了！
-- 另外它的**{features.split('，')[1] if '，' in features and len(features.split('，'))>1 else '设计'}**也非常出色，完全符合我们{target_audience}的审美。
-
-📝 **使用体验**
-真的，用过一次就回不去了。特别是当你...（此处省略100字真实体验描述）。
-
-💰 **性价比**
-在这个价位能买到这种配置，真的是还要什么自行车？
-
-#好物推荐 #{product_name} #{target_audience}必备
-                    """
-
-                # 扣费与记录
-                cost = 0.5
-                # 更新数据库余额
-                with engine.begin() as conn:
-                    conn.execute(text("UPDATE users SET balance = balance - :cost WHERE id = :uid"),
-                                 {"cost": cost, "uid": st.session_state.user_id})
-
-                # 更新会话状态
-                st.session_state.balance -= cost
-
-                # 写入日志
-                log_generation(st.session_state.user_id, product_name, features, cost, generated_text)
-
-                st.success("生成成功！已扣除 ¥0.5")
-                st.markdown("---")
-                st.markdown(generated_text)
-
-    # 历史记录查看
-    with st.expander("查看我的生成历史"):
-        with engine.connect() as conn:
-            df = pd.read_sql_query(
-                "SELECT product_name, created_at, cost FROM generation_logs WHERE user_id = :uid ORDER BY created_at DESC",
-                conn, params={"uid": st.session_state.user_id}
+        try:
+            # 调用 AI 模型 (自动适配 DeepSeek/百炼)
+            response = self.client.chat.completions.create(
+                model=os.getenv("MODEL_NAME", "gpt-3.5-turbo"), # 默认模型
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7
             )
-            if not df.empty:
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.write("暂无历史记录")
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"AI 生成失败: {e}")
+            return f"Error generating content: {str(e)}"
+
+# ==========================================
+# 5. 页面渲染逻辑
+# ==========================================
+def show_login():
+    st.session_state['page'] = 'login'
+
+def show_dashboard():
+    if 'user_id' not in st.session_state:
+        show_login()
+        return
+    
+    engine = st.session_state['engine']
+    lang = st.session_state.get('language', 'en')
+    generator = SEOGenerator(st.session_state['user_id'], engine)
+
+    st.sidebar.title(get_text(lang, "login_title"))
+    st.sidebar.write(f"👤 {st.session_state['username']}")
+    st.sidebar.write(f"💰 {get_text(lang, 'balance')}: ${generator.get_balance():.2f}")
+    
+    if st.sidebar.button(get_text(lang, "logout")):
+        for key in ['user_id', 'username', 'page']:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    st.header(get_text(lang, "generate_btn"))
+    
+    # 输入区域
+    col1, col2 = st.columns(2)
+    with col1:
+        topic = st.text_input(get_text(lang, "topic_input"))
+    with col2:
+        platform = st.selectbox(get_text(lang, "platform_select"), ['blog', 'instagram', 'linkedin'])
+
+    if st.button(get_text(lang, "generate_btn")):
+        if not topic:
+            st.warning(get_text(lang, "error_empty_topic"))
+        elif generator.get_balance() < 5.0:
+            st.error(get_text(lang, "error_low_balance"))
+        else:
+            with st.spinner("Generating..."):
+                content = generator.generate_content(platform, topic, lang)
+                if content.startswith("Error"):
+                    st.error(content)
+                else:
+                    st.success(get_text(lang, "success_generation"))
+                    st.markdown(f"---\n{content}\n---")
+                    # 保存数据
+                    generator.deduct_balance(5.0)
+                    generator.save_history(topic, platform, content)
+                    st.rerun()
+
+    # 历史记录
+    st.subheader(get_text(lang, "history_title"))
+    with engine.connect() as conn:
+        df = pd.read_sql_query(
+            "SELECT topic, platform, created_at FROM history WHERE user_id = :uid ORDER BY created_at DESC LIMIT 10",
+            conn, params={"uid": st.session_state['user_id']}
+        )
+        if not df.empty:
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No history yet.")
+
+# ==========================================
+# 6. 主程序入口
+# ==========================================
+def main():
+    # 1. 环境变量检查
+    if not os.getenv('DATABASE_URL'):
+        st.error("❌ Critical Error: DATABASE_URL environment variable is not set.")
+        st.stop()
+    
+    # 2. 数据库初始化
+    engine = get_db_engine()
+    if not engine:
+        st.error("❌ Failed to connect to database.")
+        st.stop()
+    if not init_db():
+        st.error("❌ Database initialization failed.")
+        st.stop()
+
+    # 3. 全局状态初始化
+    if 'engine' not in st.session_state:
+        st.session_state['engine'] = engine
+    if 'page' not in st.session_state:
+        st.session_state['page'] = 'login'
+    if 'language' not in st.session_state:
+        st.session_state['language'] = 'en'
+
+    # 4. 页面路由
+    if st.session_state['page'] == 'login':
+        # 登录界面
+        st.title("🚀 SEO Content Generator")
+        lang = st.selectbox("Language", ['en', 'zh'], index=0)
+        st.session_state['language'] = lang
+        
+        tab1, tab2 = st.tabs([get_text(lang, "login_btn"), get_text(lang, "register_btn")])
+        
+        with tab1:
+            username = st.text_input(get_text(lang, "username"), key="login_user")
+            password = st.text_input(get_text(lang, "password"), type="password", key="login_pass")
+            if st.button(get_text(lang, "login_btn")):
+                with engine.connect() as conn:
+                    result = conn.execute(text("SELECT id, password_hash FROM users WHERE username = :user"), {"user": username})
+                    row = result.fetchone()
+                    if row and pwd_context.verify(password, row[1]):
+                        st.session_state['user_id'] = row[0]
+                        st.session_state['username'] = username
+                        st.session_state['page'] = 'dashboard'
+                        st.rerun()
+                    else:
+                        st.error("Invalid credentials")
+        
+        with tab2:
+            new_user = st.text_input(get_text(lang, "username"), key="reg_user")
+            new_pass = st.text_input(get_text(lang, "password"), type="password", key="reg_pass")
+            if st.button(get_text(lang, "register_btn")):
+                try:
+                    hashed = pwd_context.hash(new_pass)
+                    with engine.begin() as conn:
+                        conn.execute(text("INSERT INTO users (username, password_hash) VALUES (:user, :hash)"), {"user": new_user, "hash": hashed})
+                        # 初始化余额
+                        user_res = conn.execute(text("SELECT id FROM users WHERE username = :user"), {"user": new_user})
+                        uid = user_res.fetchone()[0]
+                        conn.execute(text("INSERT INTO balances (user_id) VALUES (:uid)"), {"uid": uid})
+                    st.success(get_text(lang, "register_success"))
+                except Exception as e:
+                    st.error("Username already exists")
+                    
+    elif st.session_state['page'] == 'dashboard':
+        show_dashboard()
+
+if __name__ == "__main__":
+    main()
