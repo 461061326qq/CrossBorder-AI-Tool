@@ -38,7 +38,7 @@ def init_db():
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
-                username VARCHAR(50) UNIQUE NOT NULL,
+                user_name VARCHAR(50) UNIQUE NOT NULL,
                 password VARCHAR(100) NOT NULL,
                 balance DECIMAL(10, 2) DEFAULT 0.00,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -73,13 +73,15 @@ init_db()
 # --- 3. 辅助函数 ---
 def get_user_by_username(username):
     with engine.connect() as conn:
-        result = conn.execute(text("SELECT * FROM users WHERE username = :u"), {"u": username})
+        # 修正：WHERE user_name
+        result = conn.execute(text("SELECT * FROM users WHERE user_name = :u"), {"u": username})
         return result.mappings().first()
 
 def create_user(username, password):
     try:
         with engine.begin() as conn:
-            conn.execute(text("INSERT INTO users (username, password, balance) VALUES (:u, :p, 0)"),
+            # 修正：INSERT INTO users (user_name, ...)
+            conn.execute(text("INSERT INTO users (user_name, password, balance) VALUES (:u, :p, 0)"),
                          {"u": username, "p": password})
         return True
     except SQLAlchemyError:
@@ -136,7 +138,7 @@ with st.sidebar:
                 if user and user['password'] == login_pass:
                     st.session_state.logged_in = True
                     st.session_state.user_id = user['id']
-                    st.session_state.username = user['username']
+                    st.session_state.username = user['user_name']
                     st.session_state.balance = float(user['balance'])
                     st.rerun()
                 else:
@@ -241,8 +243,7 @@ else:
         with engine.connect() as conn:
             df = pd.read_sql_query(
                 "SELECT product_name, created_at, cost FROM generation_logs WHERE user_id = :uid ORDER BY created_at DESC",
-                conn,
-                params={"uid": st.session_state.user_id}
+                conn, params={"uid": st.session_state.user_id}
             )
             if not df.empty:
                 st.dataframe(df, use_container_width=True)
