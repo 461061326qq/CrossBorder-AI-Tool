@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: crossborder-ai-tool
+    env: python
+    runtime: python-3.11.11
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python start.py"
+    
+    # 👇 所有的环境变量合并到这一个列表中
+    envVars:
+      # --- 数据库与密钥配置 ---
+      - key: DATABASE_URL
+        fromDatabase:
+          name: crossborder-db
+          property: connectionString
+      - key: API_KEY
+        sync: false # 这意味着你需要在 Render 后台手动填入值
+      - key: SECRET_KEY
+        generateValue: true
+
+      # --- 应用基础配置 ---
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "8501"
+      - key: RENDER
+        value: "true"
+
+    # --- 服务监控与部署策略 ---
+    healthCheckPath: "/?health=check"
+    autoDeploy: true
+
+    # --- 数据库定义 ---
+databases:
+  - name: crossborder-db
+    databaseName: crossborder_ai_tool
+    user: crossborder_user
+    plan: free
+    ipAllowList: []
